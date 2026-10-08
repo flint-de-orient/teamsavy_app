@@ -23,8 +23,21 @@ class PageScroll extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // AppShell's Scaffold uses extendBody: true, so its floating pill-
+    // shaped bottom tab bar (lib/shell/app_shell.dart's _BottomBar, 66
+    // tall + its own bottom system-inset padding) is painted OVER this
+    // page's content instead of reserving space for it - and on a
+    // 3-button-navigation device, Android's own navigation bar sits below
+    // that again. Without this, a bottom-anchored control (e.g. the Punch
+    // screen's "Save Enrollment Photo" button) can end up entirely behind
+    // both bars - visible, but physically untappable, since the system
+    // nav bar always wins the touch. Pad every page's scrollable content
+    // by the system inset plus the tab bar's own height so there's always
+    // real scroll room to clear both.
+    final systemBottomInset = MediaQuery.of(context).padding.bottom;
+    final effectivePadding = padding.copyWith(bottom: padding.bottom + systemBottomInset + 66);
     final list = ListView(
-      padding: padding,
+      padding: effectivePadding,
       physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       children: [Gap(gap: gap, children: children)],
