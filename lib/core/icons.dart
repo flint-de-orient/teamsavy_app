@@ -10,6 +10,7 @@ final Map<String, IconData> _byName = {
   'layout-dashboard': LucideIcons.layoutDashboard,
   'file-signature': LucideIcons.fileSignature,
   'users': LucideIcons.users,
+  'user-minus': LucideIcons.userMinus,
   'megaphone': LucideIcons.megaphone,
   'clipboard-list': LucideIcons.clipboardList,
   'bar-chart-3': LucideIcons.barChart3,

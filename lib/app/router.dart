@@ -8,6 +8,7 @@ import '../features/payroll/routes.dart';
 import '../features/people/routes.dart';
 import '../features/settings/routes.dart';
 import '../features/tasks/routes.dart';
+import '../features/termination_letters/routes.dart';
 import '../shell/app_shell.dart';
 import '../widgets/ts.dart';
 
@@ -67,6 +68,7 @@ final router = GoRouter(
         ...expensesRoutes,
         ...tasksRoutes,
         ...settingsRoutes,
+        ...terminationLettersRoutes,
       ],
     ),
   ],
