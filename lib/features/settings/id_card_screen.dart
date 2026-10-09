@@ -85,6 +85,9 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
   late Json _front = _copy(widget.data.m('frontLayout'));
   late Json _back = _copy(widget.data.m('backLayout'));
   late Uint8List? _frontBackground = _decodeDataUri(widget.data.sn('frontBackgroundImageDataUri'));
+  late Uint8List? _backBackground = _decodeDataUri(widget.data.sn('backBackgroundImageDataUri'));
+  bool _bgUploading = false;
+  String? _bgUploadError;
   // Editable "Preview Data" - seeded from the hardcoded defaults, local to
   // this designer session only (never saved), feeding both the on-canvas
   // preview and _previewPdf()'s request body. See id-card-designer.tsx's
@@ -112,6 +115,7 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
   }
 
   Json get _active => _face == 'front' ? _front : _back;
+  Uint8List? get _activeBackground => _face == 'front' ? _frontBackground : _backBackground;
 
   /// Every field key placed anywhere on the front or back - what the
   /// "Preview Data" panel offers an input for.
@@ -139,6 +143,7 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
     _front = _copy(preset.m('front'));
     _back = _copy(preset.m('back'));
     _frontBackground = null;
+    _backBackground = null;
     _selectedId = null;
   }
 
@@ -281,8 +286,69 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
       _front = _copy(data.m('front'));
       _back = _copy(data.m('back'));
       _frontBackground = _decodeDataUri(data.sn('frontBackgroundImageDataUri'));
+      // The AI generator only ever produces a front background image.
+      _backBackground = null;
       _selectedId = null;
     });
+  }
+
+  /// Manual counterpart to "Design ID by AI"'s background image - uploads
+  /// the picked file via the exact same storage helper
+  /// (saveIdCardBackgroundImage) the AI flow uses, through the
+  /// `settings.uploadIdCardBackgroundImage` action, then follows the
+  /// identical "set the path + show the returned data URI immediately,
+  /// don't persist until Save" pattern `_generateAiDesign` above already
+  /// uses. A freshly uploaded image always starts centered (position
+  /// fields cleared) - any prior drag-repositioning belonged to the old
+  /// image. See id-card-designer.tsx's handleUploadBackgroundImage for
+  /// the web equivalent.
+  Future<void> _uploadBackgroundImage(UploadFile? file) async {
+    if (file == null) return;
+    setState(() {
+      _bgUploading = true;
+      _bgUploadError = null;
+    });
+    final r = await api.action('settings.uploadIdCardBackgroundImage', files: {'file': file});
+    if (!mounted) return;
+    setState(() {
+      _bgUploading = false;
+      final data = r.data;
+      if (!r.ok || data == null) {
+        _bgUploadError = r.error;
+        return;
+      }
+      _apply(_active, {
+        'backgroundImagePath': data.sn('path'),
+        'backgroundImagePositionX': null,
+        'backgroundImagePositionY': null,
+      });
+      final decoded = _decodeDataUri(data.sn('dataUri'));
+      if (_face == 'front') {
+        _frontBackground = decoded;
+      } else {
+        _backBackground = decoded;
+      }
+    });
+  }
+
+  void _removeBackgroundImage() {
+    setState(() {
+      _apply(_active, {
+        'backgroundImagePath': null,
+        'backgroundImagePositionX': null,
+        'backgroundImagePositionY': null,
+      });
+      if (_face == 'front') {
+        _frontBackground = null;
+      } else {
+        _backBackground = null;
+      }
+      _bgUploadError = null;
+    });
+  }
+
+  void _changeBackgroundPosition(double x, double y) {
+    setState(() => _apply(_active, {'backgroundImagePositionX': x, 'backgroundImagePositionY': y}));
   }
 
   /// POSTs the in-progress (possibly unsaved) layout to the web's
@@ -383,7 +449,7 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
     final p = Ts.of(context);
     final layout = _active;
     final selected = _selected;
-    final hasBackground = _face == 'front' && _frontBackground != null;
+    final hasBackground = _activeBackground != null;
     return Gap(
       children: [
         if (_canWrite) _aiPanel(p),
@@ -455,10 +521,11 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
           orientation: _orientation,
           selectedId: _selectedId,
           editable: _canWrite,
-          backgroundImage: _face == 'front' ? _frontBackground : null,
+          backgroundImage: _activeBackground,
           sampleValues: _sampleValues,
           onSelect: (id) => setState(() => _selectedId = id),
           onChange: _updateElement,
+          onBackgroundPositionChanged: _changeBackgroundPosition,
         ),
         _ElementChips(
           elements: _elementsOf(layout).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList(),
@@ -479,12 +546,10 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
             canWrite: _canWrite,
             hasBackgroundImage: hasBackground,
             onChange: _updateLayout,
-            onRemoveBackgroundImage: _face == 'front'
-                ? () => setState(() {
-                      _front.remove('backgroundImagePath');
-                      _frontBackground = null;
-                    })
-                : null,
+            onUploadBackgroundImage: _uploadBackgroundImage,
+            onRemoveBackgroundImage: _removeBackgroundImage,
+            bgUploading: _bgUploading,
+            bgUploadError: _bgUploadError,
           ),
         if (_canWrite) ...[
           if (_saveError != null) StatusMessage.error(_saveError),
@@ -689,6 +754,8 @@ class _PreviewDataPanelState extends State<_PreviewDataPanel> {
   }
 }
 
+const _idCardBgImageTypes = ['jpg', 'jpeg', 'png', 'webp'];
+
 /// The right-hand "Card" panel shown while nothing is selected.
 class _CardPanel extends StatelessWidget {
   const _CardPanel({
@@ -696,13 +763,19 @@ class _CardPanel extends StatelessWidget {
     required this.canWrite,
     required this.hasBackgroundImage,
     required this.onChange,
-    this.onRemoveBackgroundImage,
+    required this.onUploadBackgroundImage,
+    required this.onRemoveBackgroundImage,
+    required this.bgUploading,
+    required this.bgUploadError,
   });
   final Json layout;
   final bool canWrite;
   final bool hasBackgroundImage;
   final ValueChanged<Map<String, Object?>> onChange;
-  final VoidCallback? onRemoveBackgroundImage;
+  final ValueChanged<UploadFile?> onUploadBackgroundImage;
+  final VoidCallback onRemoveBackgroundImage;
+  final bool bgUploading;
+  final String? bgUploadError;
 
   @override
   Widget build(BuildContext context) {
@@ -714,18 +787,30 @@ class _CardPanel extends StatelessWidget {
         children: [
           Text('Card', style: tx(14, weight: FontWeight.w600, color: p.foreground)),
           const Muted('Click an element to edit its style, or select nothing to edit the card itself.', size: 12),
-          if (hasBackgroundImage)
+          if (hasBackgroundImage) ...[
             TsPanel(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               color: p.background,
               child: Row(
                 children: [
-                  Expanded(child: Text('AI background image set', style: tx(14, color: p.foreground))),
-                  if (canWrite && onRemoveBackgroundImage != null)
+                  Expanded(child: Text('Background image set', style: tx(14, color: p.foreground))),
+                  if (canWrite)
                     TsLink('Remove', onTap: onRemoveBackgroundImage, size: 12, color: p.danger, weight: FontWeight.w500),
                 ],
               ),
             ),
+            const Muted('Drag the image on the canvas to reposition it.', size: 12),
+          ],
+          if (canWrite)
+            TsFileField(
+              label: hasBackgroundImage ? 'Replace background image' : 'Upload background image',
+              file: null,
+              onChanged: onUploadBackgroundImage,
+              accept: _idCardBgImageTypes,
+              placeholder: 'Choose an image',
+            ),
+          if (bgUploading) const Muted('Uploading...', size: 12),
+          if (bgUploadError != null) StatusMessage.error(bgUploadError),
           ColorField(
             label: 'Background color',
             value: layout.sn('backgroundColor'),

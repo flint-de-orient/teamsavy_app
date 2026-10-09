@@ -197,6 +197,7 @@ class IdCardCanvas extends StatelessWidget {
     this.backgroundImage,
     this.editable = true,
     this.sampleValues,
+    this.onBackgroundPositionChanged,
   });
 
   final Json layout;
@@ -209,6 +210,12 @@ class IdCardCanvas extends StatelessWidget {
   // The designer's editable "Preview Data" - falls back to the hardcoded
   // defaults (idCardSampleValueDefaults) when the caller doesn't pass one.
   final Map<String, String>? sampleValues;
+  // Drag-to-reposition the background image - see layout-types.ts's
+  // CardLayout.backgroundImagePositionX/Y. Called with the new 0-100
+  // percentages on each axis as the admin drags; omitted (null) makes the
+  // background layer a plain tap-to-deselect area with no drag, same as
+  // before this feature existed.
+  final void Function(double x, double y)? onBackgroundPositionChanged;
 
   // The web canvas renders at 96px/in x 2.5 zoom; on a phone it's scaled
   // down to fit the width.
@@ -226,6 +233,16 @@ class IdCardCanvas extends StatelessWidget {
         final borderWidth = layout.d('borderWidth');
         final elements = layout.l('elements');
         final resolvedSampleValues = sampleValues ?? idCardSampleValueDefaults;
+        // See layout-types.ts's CardLayout.backgroundImagePositionX/Y -
+        // 0-100 on each axis, 50 (center) when unset, same default every
+        // pre-existing layout already renders at. Flutter's `Alignment`
+        // uses -1..1 ("start"..."end") for the same cover-fit positioning
+        // CSS `background-position` expresses as 0%-100%, so `(pct/50)-1`
+        // is the exact, direction-for-direction equivalent of this
+        // percentage on both axes - not an approximation of it.
+        final posX = layout.dN('backgroundImagePositionX') ?? 50;
+        final posY = layout.dN('backgroundImagePositionY') ?? 50;
+        final bgAlignment = Alignment((posX / 50) - 1, (posY / 50) - 1);
         return Center(
           child: Container(
             decoration: BoxDecoration(
@@ -235,9 +252,14 @@ class IdCardCanvas extends StatelessWidget {
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(Ts.rLg - 1),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => onSelect(null),
+              child: _BackgroundDragLayer(
+                active: backgroundImage != null && editable && onBackgroundPositionChanged != null,
+                posX: posX,
+                posY: posY,
+                cardPxWidth: cardW * ppi,
+                cardPxHeight: cardH * ppi,
+                onPositionChanged: (x, y) => onBackgroundPositionChanged?.call(x, y),
+                onTapDeselect: () => onSelect(null),
                 child: Container(
                   width: cardW * ppi,
                   height: cardH * ppi,
@@ -245,7 +267,11 @@ class IdCardCanvas extends StatelessWidget {
                     color: hexColor(layout.sn('backgroundColor')) ?? Colors.white,
                     image: backgroundImage == null
                         ? null
-                        : DecorationImage(image: MemoryImage(backgroundImage!), fit: BoxFit.cover),
+                        : DecorationImage(
+                            image: MemoryImage(backgroundImage!),
+                            fit: BoxFit.cover,
+                            alignment: bgAlignment,
+                          ),
                     border: borderColor != null && borderWidth > 0
                         ? Border.all(color: borderColor, width: borderWidth * pt)
                         : null,
@@ -274,6 +300,78 @@ class IdCardCanvas extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Drag-to-reposition the background image - tracks a 0-100
+/// background-position percentage over the card's full on-screen pixel
+/// size. Deliberately a `GestureDetector` (onTap + onPanStart/Update),
+/// NOT a raw `Listener`: a plain `Listener` receives every raw pointer
+/// event in its hit-test area unconditionally, so an ancestor Listener
+/// here would ALSO fire while dragging a child `_CanvasElement` below
+/// (which claims the gesture via its own `EagerGestureRecognizer` - see
+/// `_draggable`). A `GestureDetector`'s recognizers instead properly
+/// compete in Flutter's real gesture arena, where an `EagerGestureRecognizer`
+/// anywhere in the same hit-test path always wins outright regardless of
+/// recognizer type - exactly like today's outer
+/// `GestureDetector(onTap: () => onSelect(null))` already coexists
+/// correctly with element dragging, just extended here with a pan
+/// recognizer for the background-only case. [active] false (no
+/// background image, not editable, or the caller didn't want
+/// repositioning) omits the pan recognizers entirely, leaving a plain
+/// tap-to-deselect area - byte-for-byte the prior behavior. */
+class _BackgroundDragLayer extends StatefulWidget {
+  const _BackgroundDragLayer({
+    required this.child,
+    required this.active,
+    required this.posX,
+    required this.posY,
+    required this.cardPxWidth,
+    required this.cardPxHeight,
+    required this.onPositionChanged,
+    required this.onTapDeselect,
+  });
+  final Widget child;
+  final bool active;
+  final double posX;
+  final double posY;
+  final double cardPxWidth;
+  final double cardPxHeight;
+  final void Function(double x, double y) onPositionChanged;
+  final VoidCallback onTapDeselect;
+
+  @override
+  State<_BackgroundDragLayer> createState() => _BackgroundDragLayerState();
+}
+
+class _BackgroundDragLayerState extends State<_BackgroundDragLayer> {
+  double _x = 50;
+  double _y = 50;
+
+  void _onPanStart(DragStartDetails d) {
+    _x = widget.posX;
+    _y = widget.posY;
+  }
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    // Clamped to [0,100] so the image (BoxFit.cover - Flutter's
+    // equivalent of CSS background-size:cover) can never be dragged far
+    // enough to expose blank space inside the card, same clamp
+    // id-card-designer.tsx's clampBgPercent enforces on the web side.
+    _x = (_x + d.delta.dx / widget.cardPxWidth * 100).clamp(0.0, 100.0);
+    _y = (_y + d.delta.dy / widget.cardPxHeight * 100).clamp(0.0, 100.0);
+    widget.onPositionChanged(_x, _y);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.onTapDeselect,
+      onPanStart: widget.active ? _onPanStart : null,
+      onPanUpdate: widget.active ? _onPanUpdate : null,
+      child: widget.child,
     );
   }
 }
