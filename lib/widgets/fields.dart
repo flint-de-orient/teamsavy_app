@@ -719,66 +719,82 @@ Future<String?> showMonthPicker(BuildContext context, String value) {
   return showModalBottomSheet<String>(
     context: context,
     showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
     builder:
         (ctx) => StatefulBuilder(
           builder:
-              (ctx, setState) => Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: () => setState(() => year--),
-                          icon: Icon(LucideIcons.chevronLeft, color: p.muted),
-                        ),
-                        Expanded(
-                          child: Text(
-                            '$year',
-                            textAlign: TextAlign.center,
-                            style: tx(16, weight: FontWeight.w700, color: p.foreground),
+              (ctx, setState) => ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+                child: Padding(
+                  // Same reasoning as PageScroll (lib/widgets/screen.dart): add the
+                  // system bottom inset explicitly, on top of useSafeArea's own
+                  // handling, so the grid clears the 3-button nav bar / floating
+                  // tab bar instead of being cut off or unscrollable underneath it.
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 24 + MediaQuery.of(ctx).padding.bottom + 66),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed: () => setState(() => year--),
+                            icon: Icon(LucideIcons.chevronLeft, color: p.muted),
                           ),
-                        ),
-                        IconButton(
-                          onPressed: () => setState(() => year++),
-                          icon: Icon(LucideIcons.chevronRight, color: p.muted),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    GridView.count(
-                      crossAxisCount: 4,
-                      shrinkWrap: true,
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      childAspectRatio: 1.8,
-                      physics: const NeverScrollableScrollPhysics(),
-                      children: [
-                        for (var m = 1; m <= 12; m++)
-                          GestureDetector(
-                            onTap: () => Navigator.of(ctx).pop('$year-${m.toString().padLeft(2, '0')}'),
-                            child: Container(
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                gradient: (m == selectedMonth && year == selectedYear) ? p.gradientPrimary : null,
-                                color: (m == selectedMonth && year == selectedYear) ? null : p.surfaceHover,
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Text(
-                                monthShort(m),
-                                style: tx(
-                                  14,
-                                  weight: FontWeight.w600,
-                                  color:
-                                      (m == selectedMonth && year == selectedYear) ? p.primaryForeground : p.foreground,
-                                ),
-                              ),
+                          Expanded(
+                            child: Text(
+                              '$year',
+                              textAlign: TextAlign.center,
+                              style: tx(16, weight: FontWeight.w700, color: p.foreground),
                             ),
                           ),
-                      ],
-                    ),
-                  ],
+                          IconButton(
+                            onPressed: () => setState(() => year++),
+                            icon: Icon(LucideIcons.chevronRight, color: p.muted),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: GridView.count(
+                            crossAxisCount: 4,
+                            shrinkWrap: true,
+                            mainAxisSpacing: 8,
+                            crossAxisSpacing: 8,
+                            childAspectRatio: 1.8,
+                            physics: const NeverScrollableScrollPhysics(),
+                            children: [
+                              for (var m = 1; m <= 12; m++)
+                                GestureDetector(
+                                  onTap: () => Navigator.of(ctx).pop('$year-${m.toString().padLeft(2, '0')}'),
+                                  child: Container(
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      gradient:
+                                          (m == selectedMonth && year == selectedYear) ? p.gradientPrimary : null,
+                                      color: (m == selectedMonth && year == selectedYear) ? null : p.surfaceHover,
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      monthShort(m),
+                                      style: tx(
+                                        14,
+                                        weight: FontWeight.w600,
+                                        color:
+                                            (m == selectedMonth && year == selectedYear)
+                                                ? p.primaryForeground
+                                                : p.foreground,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
         ),

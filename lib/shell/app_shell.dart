@@ -18,6 +18,36 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+  bool _canPop = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleCanPopRefresh();
+  }
+
+  @override
+  void didUpdateWidget(covariant AppShell old) {
+    super.didUpdateWidget(old);
+    _scheduleCanPopRefresh();
+  }
+
+  /// GoRouter rebuilds this shell (via ShellRoute's builder) the instant a
+  /// push/pop is requested, but the nested shell Navigator - which actually
+  /// owns the back stack - only applies that change a frame later. Reading
+  /// `GoRouter.of(context).canPop()` synchronously inside `build()` therefore
+  /// returns a stale snapshot from *before* the navigation lands, which is
+  /// why the back arrow never appeared: by the time this widget rebuilds,
+  /// it's reading the old (pre-push) stack depth, and nothing rebuilds it
+  /// again afterwards to pick up the corrected value. Re-checking once the
+  /// frame has settled, and only then updating state, fixes that.
+  void _scheduleCanPopRefresh() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final canPop = GoRouter.of(context).canPop();
+      if (canPop != _canPop) setState(() => _canPop = canPop);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +55,6 @@ class _AppShellState extends State<AppShell> {
     final me = session.me;
     final tabs = me == null ? <_Tab>[] : _tabsFor(me);
     final path = widget.location.path;
-    final canPop = GoRouter.of(context).canPop();
 
     return Scaffold(
       key: _scaffoldKey,
@@ -36,7 +65,7 @@ class _AppShellState extends State<AppShell> {
       body: WashBackground(
         child: Column(
           children: [
-            _Topbar(canPop: canPop, path: path, onMenu: () => _scaffoldKey.currentState?.openDrawer(), onBack: () => context.pop()),
+            _Topbar(canPop: _canPop, path: path, onMenu: () => _scaffoldKey.currentState?.openDrawer(), onBack: () => context.pop()),
             Expanded(child: MediaQuery.removePadding(context: context, removeTop: true, child: widget.child)),
           ],
         ),
@@ -280,7 +309,11 @@ void _showUserSheet(BuildContext context) {
     useSafeArea: true,
     builder:
         (ctx) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          // Same reasoning as PageScroll (lib/widgets/screen.dart): useSafeArea
+          // alone isn't enough in this app's extend-body layout, so add the
+          // system bottom inset explicitly on top of it, or Sign Out ends up
+          // behind the 3-button Android nav bar.
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(ctx).padding.bottom + 66),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
