@@ -784,12 +784,15 @@ class _AddPayBandFormState extends State<_AddPayBandForm> {
 /// Special Allowance figures match the web preview to the rupee.
 int _jsRound(double x) => (x + 0.5).floor();
 
-/// lib/salary-breakup.ts#computeSalaryBreakup.
-List<(String, int, int)> _salaryBreakup(Map<String, double> r, int annualCTC) {
+/// lib/salary-breakup.ts#computeSalaryBreakup. `cityType` picks which of the
+/// two HRA rates applies - lib/salary-breakup.ts's own Metro/Non-Metro
+/// auto-classification (hraMetroPercentOfBasic vs hraNonMetroPercentOfBasic).
+List<(String, int, int)> _salaryBreakup(Map<String, double> r, int annualCTC, String cityType) {
   final basic = _jsRound(r['basicPercentOfCTC']! / 100 * annualCTC);
   final da = _jsRound(r['daPercentOfCTC']! / 100 * annualCTC);
   final wages = basic + da;
-  final hra = _jsRound(r['hraPercentOfBasic']! / 100 * basic);
+  final hraPercent = cityType == 'METRO' ? r['hraMetroPercentOfBasic']! : r['hraNonMetroPercentOfBasic']!;
+  final hra = _jsRound(hraPercent / 100 * basic);
   final employerPf = _jsRound(r['employerPfPercentOfWages']! / 100 * wages);
   final gratuity = _jsRound(r['gratuityPercentOfWages']! / 100 * wages);
   final special = annualCTC - (basic + da + hra + employerPf + gratuity);
@@ -818,7 +821,8 @@ class _SalaryStructureFormState extends State<_SalaryStructureForm> with _SaveSt
   static const _fields = [
     ('basicPercentOfCTC', 'Basic Salary (% of CTC)'),
     ('daPercentOfCTC', 'Dearness Allowance (% of CTC)'),
-    ('hraPercentOfBasic', 'HRA (% of Basic)'),
+    ('hraMetroPercentOfBasic', 'HRA, Metro city (% of Basic)'),
+    ('hraNonMetroPercentOfBasic', 'HRA, Non-Metro city (% of Basic)'),
     ('employerPfPercentOfWages', 'Employer PF (% of Basic + DA)'),
     ('gratuityPercentOfWages', 'Gratuity (% of Basic + DA)'),
   ];
@@ -871,11 +875,19 @@ class _SalaryStructureFormState extends State<_SalaryStructureForm> with _SaveSt
           ),
         ),
         const SectionTitle('Preview (live, based on the values above)'),
-        for (final band in widget.payBands)
+        // No specific employee here (a Pay Band is a reusable template), so
+        // both city types are shown - stacked, matching the web preview's
+        // own mobile-width (grid-cols-1) layout - rather than picking one.
+        for (final band in widget.payBands) ...[
           _BreakupCard(
-            title: '${band.s('name')} — ${rupee(band.i('annualCTC'))} CTC',
-            lines: _salaryBreakup(rates, band.i('annualCTC')),
+            title: '${band.s('name')} — ${rupee(band.i('annualCTC'))} CTC (Metro City)',
+            lines: _salaryBreakup(rates, band.i('annualCTC'), 'METRO'),
           ),
+          _BreakupCard(
+            title: '${band.s('name')} — ${rupee(band.i('annualCTC'))} CTC (Non-Metro City)',
+            lines: _salaryBreakup(rates, band.i('annualCTC'), 'NON_METRO'),
+          ),
+        ],
         if (widget.payBands.isEmpty) const Muted('Add a Pay Band to see a live preview.'),
       ],
     );
