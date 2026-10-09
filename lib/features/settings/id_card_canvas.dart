@@ -65,7 +65,12 @@ const _printLabels = {
   'COMPANY_NAME': 'Company',
 };
 
-const _sampleValues = {
+// Default seed for the designer's editable "Preview Data" fields
+// (id_card_screen.dart's `_sampleValues` state) - mirrors the web
+// designer's SAMPLE_VALUES and the preview route's SAMPLE_DATA key-for-key.
+// `ElementPreview` below takes the live (possibly-edited) map as a
+// parameter; this is only ever the starting point, never mutated here.
+const Map<String, String> idCardSampleValueDefaults = {
   'EMPLOYEE_CODE': '2001010001',
   'NAME': 'Jane Doe',
   'PHOTO': '',
@@ -191,6 +196,7 @@ class IdCardCanvas extends StatelessWidget {
     required this.onChange,
     this.backgroundImage,
     this.editable = true,
+    this.sampleValues,
   });
 
   final Json layout;
@@ -200,6 +206,9 @@ class IdCardCanvas extends StatelessWidget {
   final void Function(String id, Map<String, Object?> patch) onChange;
   final Uint8List? backgroundImage;
   final bool editable;
+  // The designer's editable "Preview Data" - falls back to the hardcoded
+  // defaults (idCardSampleValueDefaults) when the caller doesn't pass one.
+  final Map<String, String>? sampleValues;
 
   // The web canvas renders at 96px/in x 2.5 zoom; on a phone it's scaled
   // down to fit the width.
@@ -216,6 +225,7 @@ class IdCardCanvas extends StatelessWidget {
         final borderColor = hexColor(layout.sn('borderColor'));
         final borderWidth = layout.d('borderWidth');
         final elements = layout.l('elements');
+        final resolvedSampleValues = sampleValues ?? idCardSampleValueDefaults;
         return Center(
           child: Container(
             decoration: BoxDecoration(
@@ -252,6 +262,7 @@ class IdCardCanvas extends StatelessWidget {
                           cardHeight: cardH,
                           selected: el.s('id') == selectedId,
                           editable: editable,
+                          sampleValues: resolvedSampleValues,
                           onSelect: () => onSelect(el.s('id')),
                           onChange: (patch) => onChange(el.s('id'), patch),
                         ),
@@ -276,6 +287,7 @@ class _CanvasElement extends StatefulWidget {
     required this.cardHeight,
     required this.selected,
     required this.editable,
+    required this.sampleValues,
     required this.onSelect,
     required this.onChange,
   });
@@ -286,6 +298,7 @@ class _CanvasElement extends StatefulWidget {
   final double cardHeight;
   final bool selected;
   final bool editable;
+  final Map<String, String> sampleValues;
   final VoidCallback onSelect;
   final ValueChanged<Map<String, Object?>> onChange;
 
@@ -351,7 +364,11 @@ class _CanvasElementState extends State<_CanvasElement> {
     final h = el.d('height') * ppi;
     final body = CustomPaint(
       foregroundPainter: _OutlinePainter(selected: widget.selected),
-      child: SizedBox(width: w, height: h, child: ElementPreview(element: el, ppi: ppi)),
+      child: SizedBox(
+        width: w,
+        height: h,
+        child: ElementPreview(element: el, ppi: ppi, sampleValues: widget.sampleValues),
+      ),
     );
     final canDrag = widget.selected && widget.editable;
     return Positioned(
@@ -428,9 +445,12 @@ class _OutlinePainter extends CustomPainter {
 /// (or just the sample with the label off), custom text its content, and
 /// photo/logo/QR a grey placeholder box.
 class ElementPreview extends StatelessWidget {
-  const ElementPreview({super.key, required this.element, required this.ppi});
+  const ElementPreview({super.key, required this.element, required this.ppi, this.sampleValues});
   final Json element;
   final double ppi;
+  // Falls back to the hardcoded defaults when the caller doesn't pass the
+  // designer's live (possibly-edited) "Preview Data" map.
+  final Map<String, String>? sampleValues;
 
   @override
   Widget build(BuildContext context) {
@@ -446,17 +466,25 @@ class ElementPreview extends StatelessWidget {
         : null;
 
     if (kind == 'field' || kind == 'static_text') {
+      final values = sampleValues ?? idCardSampleValueDefaults;
       String text;
       if (kind == 'field') {
         final key = el.sn('fieldKey');
         if (key == null) return const SizedBox.shrink();
-        final value = _sampleValues[key] ?? '';
+        final value = values[key] ?? '';
         text = el.at('showLabel') == false ? value : '${_printLabels[key] ?? key}: $value';
       } else {
         text = el.s('content');
       }
       final align = el.s('textAlign', 'left');
       final family = el.s('fontFamily', 'Arial');
+      // `wordWrap`: wraps onto multiple lines instead of the default
+      // single-line clip - mirrors id-card-designer.tsx's
+      // elementPreviewStyle() (`whiteSpace: "normal"` vs `"nowrap"`) and
+      // layout-render.ts's textStyle() (`white-space:normal` vs `nowrap`).
+      // The surrounding Container still clips (Clip.hardEdge) with a fixed
+      // height, so text that's still too tall clips vertically either way.
+      final wordWrap = el.b('wordWrap');
       return Container(
         clipBehavior: Clip.hardEdge,
         padding: EdgeInsets.symmetric(horizontal: 2 * cssPx),
@@ -472,8 +500,8 @@ class ElementPreview extends StatelessWidget {
         ),
         child: Text(
           text,
-          maxLines: 1,
-          softWrap: false,
+          maxLines: wordWrap ? null : 1,
+          softWrap: wordWrap,
           overflow: TextOverflow.clip,
           textAlign: align == 'center'
               ? TextAlign.center

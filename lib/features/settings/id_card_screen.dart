@@ -85,6 +85,11 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
   late Json _front = _copy(widget.data.m('frontLayout'));
   late Json _back = _copy(widget.data.m('backLayout'));
   late Uint8List? _frontBackground = _decodeDataUri(widget.data.sn('frontBackgroundImageDataUri'));
+  // Editable "Preview Data" - seeded from the hardcoded defaults, local to
+  // this designer session only (never saved), feeding both the on-canvas
+  // preview and _previewPdf()'s request body. See id-card-designer.tsx's
+  // sampleValues for the web equivalent.
+  final Map<String, String> _sampleValues = Map<String, String>.from(idCardSampleValueDefaults);
 
   String _face = 'front';
   String? _selectedId;
@@ -107,6 +112,20 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
   }
 
   Json get _active => _face == 'front' ? _front : _back;
+
+  /// Every field key placed anywhere on the front or back - what the
+  /// "Preview Data" panel offers an input for.
+  List<String> get _previewFieldKeys {
+    final keys = <String>{};
+    for (final layout in [_front, _back]) {
+      for (final el in _elementsOf(layout)) {
+        if (el is Map && el['kind'] == 'field' && el['fieldKey'] != null) {
+          keys.add(el['fieldKey'] as String);
+        }
+      }
+    }
+    return keys.toList();
+  }
 
   Json? get _selected {
     for (final el in _elementsOf(_active)) {
@@ -285,7 +304,12 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
       ));
       final res = await client.post<List<int>>(
         '${api.host}/api/id-card/preview',
-        data: jsonEncode({'orientation': _orientation, 'frontLayout': _front, 'backLayout': _back}),
+        data: jsonEncode({
+          'orientation': _orientation,
+          'frontLayout': _front,
+          'backLayout': _back,
+          'sampleData': _sampleValues,
+        }),
         options: dio.Options(headers: {...api.authHeaders, 'Content-Type': 'application/json'}),
       );
       final bytes = res.data ?? const <int>[];
@@ -419,12 +443,20 @@ class _IdCardDesignerState extends State<_IdCardDesigner> {
           ),
         if (_suggestError != null) StatusMessage.error(_suggestError),
         if (_previewError != null) StatusMessage.error(_previewError),
+        if (_previewFieldKeys.isNotEmpty)
+          _PreviewDataPanel(
+            key: ValueKey(_previewFieldKeys.join(',')),
+            fieldKeys: _previewFieldKeys,
+            values: _sampleValues,
+            onChanged: (key, value) => setState(() => _sampleValues[key] = value),
+          ),
         IdCardCanvas(
           layout: layout,
           orientation: _orientation,
           selectedId: _selectedId,
           editable: _canWrite,
           backgroundImage: _face == 'front' ? _frontBackground : null,
+          sampleValues: _sampleValues,
           onSelect: (id) => setState(() => _selectedId = id),
           onChange: _updateElement,
         ),
@@ -586,6 +618,73 @@ class _ElementChips extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Collapsible editable sample data for the designer's own canvas preview
+/// and `_previewPdf()` - seeded from the hardcoded defaults but kept purely
+/// in local state (see _sampleValues in _IdCardDesignerState), never saved
+/// to the server. Only field keys actually placed on the front or back get
+/// an input, since that's all either preview path can use. Rebuilt (fresh
+/// controllers) whenever the caller's `key` - the joined field-key list -
+/// changes, e.g. after adding/removing a field.
+class _PreviewDataPanel extends StatefulWidget {
+  const _PreviewDataPanel({super.key, required this.fieldKeys, required this.values, required this.onChanged});
+  final List<String> fieldKeys;
+  final Map<String, String> values;
+  final void Function(String key, String value) onChanged;
+
+  @override
+  State<_PreviewDataPanel> createState() => _PreviewDataPanelState();
+}
+
+class _PreviewDataPanelState extends State<_PreviewDataPanel> {
+  bool _expanded = false;
+  late final Map<String, TextEditingController> _controllers = {
+    for (final key in widget.fieldKeys) key: TextEditingController(text: widget.values[key] ?? ''),
+  };
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Ts.of(context);
+    return TsCard(
+      padding: const EdgeInsets.all(16),
+      child: Gap(
+        gap: 12,
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Row(
+              children: [
+                Expanded(child: Text('Preview Data', style: tx(14, weight: FontWeight.w600, color: p.foreground))),
+                Icon(_expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown, size: 18, color: p.muted),
+              ],
+            ),
+          ),
+          if (_expanded) ...[
+            const Muted(
+              'Edit these to preview with realistic values - in the canvas above and the PDF preview. Not saved.',
+              size: 12,
+            ),
+            for (final key in widget.fieldKeys)
+              TsInput(
+                controller: _controllers[key],
+                label: idCardFieldLabels[key] ?? key,
+                onChanged: (v) => widget.onChanged(key, v),
+              ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -792,6 +891,12 @@ class _ElementInspectorState extends State<_ElementInspector> {
               value: el.sn('color') ?? '#0f172a',
               enabled: w,
               onChanged: (v) => onChange({'color': v}),
+            ),
+            SettingsCheckbox(
+              label: 'Word wrap (wrap onto multiple lines instead of clipping)',
+              value: el.b('wordWrap'),
+              enabled: w,
+              onChanged: (v) => onChange({'wordWrap': v}),
             ),
           ],
           ColorField(
