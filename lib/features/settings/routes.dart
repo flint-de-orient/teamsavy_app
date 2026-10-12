@@ -1,4 +1,5 @@
 import '../../widgets/ts.dart';
+import 'billing_screen.dart';
 import 'company_settings_screen.dart';
 import 'id_card_screen.dart';
 import 'policy_settings_screen.dart';
@@ -10,4 +11,5 @@ final List<RouteBase> settingsRoutes = [
   GoRoute(path: '/settings/company', builder: (context, state) => const CompanySettingsScreen()),
   GoRoute(path: '/settings/policy', builder: (context, state) => const PolicySettingsScreen()),
   GoRoute(path: '/settings/id-card', builder: (context, state) => const IdCardSettingsScreen()),
+  GoRoute(path: '/settings/billing', builder: (context, state) => const BillingSettingsScreen()),
 ];

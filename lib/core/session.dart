@@ -39,6 +39,14 @@ class Me {
   List<NavLink> get nav => raw.l('nav').map(NavLink.fromJson).toList();
   bool canSee(String href) => nav.any((l) => l.href == href);
 
+  /// Cheap billing summary (status/billingCycle/trialEndsAt/planName/
+  /// pastDueSince) - null for a platform session with no organization. The
+  /// full billing screen (lib/features/settings/billing_screen.dart) fetches
+  /// its own richer payload from GET /settings/billing; this is only for a
+  /// lightweight status indicator elsewhere in the app shell (e.g. a future
+  /// past-due banner) without a second round trip.
+  Json? get billing => raw.mN('billing');
+
   String get roleLabel =>
       const {
         'PLATFORM_ADMIN': 'Platform Admin',
