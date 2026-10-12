@@ -47,6 +47,20 @@ dependencies:
   path_provider: ^2.1.5
   intl: ^0.20.2
   url_launcher: ^6.3.2
+  # Native Razorpay Checkout for the Billing screen (lib/features/settings/
+  # billing_screen.dart) - see that file's own header comment for the
+  # subscription_id passthrough this version's source was read directly to
+  # confirm (not guessed): razorpay_flutter-1.4.6's Dart `open()` only
+  # validates that `key` is present, then the Android native delegate
+  # (RazorpayDelegate.java's openCheckout) JSON-serializes the WHOLE
+  # options map verbatim and hands it to Razorpay's native
+  # CheckoutActivity with no field allowlist at all - so nothing in this
+  # plugin itself blocks `subscription_id`. Whether Razorpay's own closed
+  # native Android/iOS SDK accepts it correctly for subscription-mode
+  # checkout is the one part that couldn't be verified by reading source
+  # (that SDK isn't vendored in this repo) - needs a real human-present
+  # checkout test (see billing_screen.dart).
+  razorpay_flutter: ^1.4.6
 
 dev_dependencies:
   flutter_test:

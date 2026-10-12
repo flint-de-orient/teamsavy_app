@@ -41,4 +41,5 @@ final Map<String, IconData> _byName = {
   'calendar-days': LucideIcons.calendarDays,
   'file-text': LucideIcons.fileText,
   'check-circle-2': LucideIcons.checkCircle2,
+  'credit-card': LucideIcons.creditCard,
 };
