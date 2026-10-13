@@ -731,7 +731,8 @@ class _InvoiceCard extends StatelessWidget {
     return MobileCard(
       children: [
         MobileCardHeader(
-          title: '${fmtDateMedium(invoice.s('periodStart'))} - ${fmtDateMedium(invoice.s('periodEnd'))}',
+          title: invoice.s('invoiceNumber'),
+          subtitle: '${fmtDateMedium(invoice.s('periodStart'))} - ${fmtDateMedium(invoice.s('periodEnd'))}',
           action: TsBadge(invoice.s('status'), tone: invoice.s('status') == 'PAID' ? BadgeTone.green : BadgeTone.amber),
         ),
         MobileCardRows(rows: [
