@@ -47,6 +47,21 @@ import '../../widgets/ts.dart';
 /// this subscription afterward (checkable via the Subscription row's
 /// razorpaySubscriptionId/status in the DB) - that requires one real,
 /// human-present test transaction before this ships to real tenants.
+///
+/// MAX SEATS / PENDING PLAN CHANGE - added alongside the web app's own
+/// billing-panel.tsx rewrite:
+///   - The seat count is now an admin-typed "Max Seats" value, not the live
+///     active-employee count (lib/billing/seats.ts) - this screen computes
+///     GST-inclusive pricing on-device (billing_pricing.dart, a hand-synced
+///     Dart port of lib/billing/gst.ts + lib/billing/money.ts) as the admin
+///     edits the Max Seats field, exactly like the web client does.
+///   - A plan/cycle switch against a UPI-funded mandate can't be updated
+///     in place (Razorpay rejects it outright) - changeSubscriptionPlan
+///     instead stages a brand-new Razorpay Subscription and returns the
+///     same checkoutSubscriptionId/checkoutKeyId shape the first-time
+///     Subscribe flow uses, which this screen now detects and opens
+///     Checkout for, same as web's "Plan Change In Progress" card
+///     (resumePendingPlanChange/cancelPendingPlanChange).
 class BillingSettingsScreen extends StatefulWidget {
   const BillingSettingsScreen({super.key});
 
@@ -68,6 +83,16 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
   bool _confirming = false;
   Future<void> Function()? _reload;
 
+  // Max Seats - lazily defaulted once from the loaded data (seatsUsed, or
+  // the live subscription's maxSeats while managing an existing one), then
+  // left entirely under the admin's control so it survives this screen's
+  // own setState() calls (pending/error changes) without resetting their
+  // typing. A fresh instance of this screen (e.g. re-navigating to it)
+  // starts over, which is correct - there is no "pick up where you left
+  // off" expectation for an unsubmitted seat count.
+  int? _seats;
+  TextEditingController? _seatsController;
+
   @override
   void initState() {
     super.initState();
@@ -79,7 +104,19 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
   @override
   void dispose() {
     _razorpay.clear();
+    _seatsController?.dispose();
     super.dispose();
+  }
+
+  void _ensureSeats(int defaultSeats) {
+    if (_seats != null) return;
+    _seats = defaultSeats;
+    _seatsController = TextEditingController(text: '$defaultSeats');
+  }
+
+  void _onSeatsChanged(String value, int minSeats) {
+    final parsed = int.tryParse(value);
+    setState(() => _seats = (parsed == null || parsed < minSeats) ? minSeats : parsed);
   }
 
   void _onPaymentSuccess(PaymentSuccessResponse response) {
@@ -88,18 +125,9 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
       _confirming = true;
       _pendingKey = null;
     });
-    // See this file's header comment: no typed `subscriptionId` field on
-    // PaymentSuccessResponse - read defensively off the raw native map if
-    // present at all. Debug-only visibility; never trusted for anything
-    // (the webhook's own razorpaySubscriptionId lookup is what matters).
     if (kDebugMode) {
       debugPrint('[billing] checkout success, native subscription id: ${response.data?['razorpay_subscription_id']}');
     }
-    // Fire-and-forget, UX nicety only - see this file's header comment and
-    // app/actions/billing.ts's confirmCheckoutPayment: the webhook is the
-    // real source of truth, so this call's outcome never gates anything
-    // here. api.action() itself never throws (failures come back as
-    // ActionResult.failure), so no catchError needed.
     unawaited(api.action(
       'billing.confirmCheckoutPayment',
       fields: {'razorpayPaymentId': response.paymentId, 'razorpaySignature': response.signature},
@@ -111,9 +139,7 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
     if (!mounted) return;
     setState(() {
       _pendingKey = null;
-      _error = response.code == Razorpay.PAYMENT_CANCELLED
-          ? null // user closed the sheet - not a real error.
-          : (response.message ?? 'Payment failed. Try again.');
+      _error = response.code == Razorpay.PAYMENT_CANCELLED ? null : (response.message ?? 'Payment failed. Try again.');
     });
   }
 
@@ -134,14 +160,46 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
     tick();
   }
 
-  Future<void> _subscribe(String planId, String cycle, String planName, Future<void> Function() reload) async {
+  /// Opens Razorpay Checkout on an already-created/staged subscription -
+  /// shared by first-time subscribe, resume-abandoned-checkout, and the
+  /// UPI-fallback re-authentication path (web's useCheckout hook).
+  void _openCheckout({
+    required String subscriptionId,
+    required String keyId,
+    required String description,
+    required Future<void> Function() reload,
+  }) {
+    _reload = reload;
+    _razorpay.open({
+      'key': keyId,
+      // See this file's header comment: subscription_id (not order_id or
+      // amount) for subscription-mode checkout - Razorpay determines the
+      // mandate-setup amount server-side from the Subscription itself.
+      'subscription_id': subscriptionId,
+      'name': 'TeamSavy',
+      'description': description,
+      'prefill': {'name': session.me?.name ?? '', 'email': session.me?.email ?? ''},
+      'theme': {'color': '#6d28d9'},
+    });
+  }
+
+  Future<void> _subscribe(String planId, String cycle, String planName, int seats, Future<void> Function() reload) async {
+    final cycleLabel = cycle == 'MONTHLY' ? 'monthly' : 'annually';
+    final confirmed = await confirmDialog(
+      context,
+      title: 'Subscribe?',
+      message: "Subscribe to $planName for $seats seat(s), billed $cycleLabel? You'll be taken to Razorpay to set up "
+          'automatic payments.',
+      confirmLabel: 'Subscribe',
+    );
+    if (!confirmed) return;
     setState(() {
       _pendingKey = '$planId:$cycle';
       _error = null;
     });
     final r = await api.action(
       'billing.initiateSubscriptionCheckout',
-      fields: {'planId': planId, 'billingCycle': cycle},
+      fields: {'planId': planId, 'billingCycle': cycle, 'maxSeats': '$seats'},
     );
     if (!mounted) return;
     if (!r.ok) {
@@ -160,35 +218,143 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
       });
       return;
     }
-    _reload = reload;
-    _razorpay.open({
-      'key': keyId,
-      // See this file's header comment: subscription_id (not order_id or
-      // amount) for subscription-mode checkout - Razorpay determines the
-      // mandate-setup amount server-side from the Subscription itself.
-      'subscription_id': subscriptionId,
-      'name': 'TeamSavy',
-      'description': '$planName - ${cycle == 'MONTHLY' ? 'Monthly' : 'Annual'}',
-      'prefill': {'name': session.me?.name ?? '', 'email': session.me?.email ?? ''},
-      'theme': {'color': '#6d28d9'},
-    });
+    _openCheckout(
+      subscriptionId: subscriptionId,
+      keyId: keyId,
+      description: '$planName - ${cycle == 'MONTHLY' ? 'Monthly' : 'Annual'}',
+      reload: reload,
+    );
   }
 
-  Future<void> _switchPlan(String planId, String cycle, Future<void> Function() reload) async {
+  Future<void> _switchPlan(String planId, String cycle, String planName, int seats, Future<void> Function() reload) async {
+    final cycleLabel = cycle == 'MONTHLY' ? 'monthly' : 'annually';
+    final confirmed = await confirmDialog(
+      context,
+      title: 'Switch plan?',
+      message: 'Switch to $planName for $seats seat(s), billed $cycleLabel? This takes effect immediately - you\'ll '
+          'be charged (or credited) a prorated amount for the rest of this billing period. If your payment method '
+          "doesn't support automatic updates, you'll instead be asked to re-authorize payment via Razorpay before the "
+          'switch completes.',
+      confirmLabel: 'Switch Plan',
+    );
+    if (!confirmed) return;
     setState(() {
       _pendingKey = '$planId:$cycle';
       _error = null;
     });
     final r = await api.action(
       'billing.changeSubscriptionPlan',
-      fields: {'planId': planId, 'billingCycle': cycle},
+      fields: {'planId': planId, 'billingCycle': cycle, 'maxSeats': '$seats'},
     );
     if (!mounted) return;
+    if (!r.ok) {
+      setState(() {
+        _pendingKey = null;
+        _error = r.error;
+      });
+      return;
+    }
+    final subscriptionId = r.data?.sn('checkoutSubscriptionId');
+    final keyId = r.data?.sn('checkoutKeyId');
+    setState(() => _pendingKey = null);
+    if (subscriptionId != null && keyId != null) {
+      // UPI-mandate fallback - a brand-new subscription was staged and
+      // needs authorizing, same as a first-time subscribe.
+      _openCheckout(
+        subscriptionId: subscriptionId,
+        keyId: keyId,
+        description: '$planName - ${cycle == 'MONTHLY' ? 'Monthly' : 'Annual'}',
+        reload: reload,
+      );
+      return;
+    }
+    await reload();
+    if (mounted) toast(context, 'Plan updated.');
+  }
+
+  Future<void> _resumeCheckout(Json subscription, Future<void> Function() reload) async {
     setState(() {
-      _pendingKey = null;
-      _error = r.ok ? null : r.error;
+      _pendingKey = 'resume-checkout';
+      _error = null;
     });
-    if (r.ok) await reload();
+    final r = await api.action(
+      'billing.initiateSubscriptionCheckout',
+      fields: {
+        'planId': subscription.s('planId'),
+        'billingCycle': subscription.s('billingCycle'),
+        'maxSeats': '${subscription.iN('maxSeats') ?? 1}',
+      },
+    );
+    if (!mounted) return;
+    setState(() => _pendingKey = null);
+    if (!r.ok) {
+      setState(() => _error = r.error);
+      return;
+    }
+    final subscriptionId = r.data?.sn('checkoutSubscriptionId');
+    final keyId = r.data?.sn('checkoutKeyId');
+    if (subscriptionId == null || keyId == null) {
+      setState(() => _error = "Couldn't resume checkout. Try again.");
+      return;
+    }
+    final cycle = subscription.s('billingCycle');
+    _openCheckout(
+      subscriptionId: subscriptionId,
+      keyId: keyId,
+      description: '${subscription.s('planName')} - ${cycle == 'MONTHLY' ? 'Monthly' : 'Annual'}',
+      reload: reload,
+    );
+  }
+
+  Future<void> _resumePendingPlanChange(Json subscription, Future<void> Function() reload) async {
+    setState(() {
+      _pendingKey = 'resume-pending';
+      _error = null;
+    });
+    final r = await api.action('billing.resumePendingPlanChange', fields: const {});
+    if (!mounted) return;
+    setState(() => _pendingKey = null);
+    if (!r.ok) {
+      setState(() => _error = r.error);
+      return;
+    }
+    final subscriptionId = r.data?.sn('checkoutSubscriptionId');
+    final keyId = r.data?.sn('checkoutKeyId');
+    if (subscriptionId == null || keyId == null) {
+      setState(() => _error = "Couldn't resume checkout. Try again.");
+      return;
+    }
+    final cycle = subscription.sn('pendingBillingCycle');
+    _openCheckout(
+      subscriptionId: subscriptionId,
+      keyId: keyId,
+      description: '${subscription.s('pendingPlanName')} - ${cycle == 'MONTHLY' ? 'Monthly' : 'Annual'}',
+      reload: reload,
+    );
+  }
+
+  Future<void> _cancelPendingPlanChange(Json subscription, Future<void> Function() reload) async {
+    final confirmed = await confirmDialog(
+      context,
+      title: 'Cancel this change?',
+      message: 'Cancel switching to ${subscription.s('pendingPlanName')}? Your current plan '
+          '(${subscription.s('planName')}) will stay exactly as it is.',
+      confirmLabel: 'Cancel This Change',
+      danger: true,
+    );
+    if (!confirmed) return;
+    setState(() {
+      _pendingKey = 'cancel-pending';
+      _error = null;
+    });
+    final r = await api.action('billing.cancelPendingPlanChange', fields: const {});
+    if (!mounted) return;
+    setState(() => _pendingKey = null);
+    if (!r.ok) {
+      setState(() => _error = r.error);
+      return;
+    }
+    await reload();
   }
 
   Future<void> _cancel(String? currentPeriodEndIso, Future<void> Function() reload) async {
@@ -203,8 +369,13 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
       danger: true,
     );
     if (!confirmed) return;
+    setState(() {
+      _pendingKey = 'cancel';
+      _error = null;
+    });
     final r = await api.action('billing.cancelSubscription', fields: const {});
     if (!mounted) return;
+    setState(() => _pendingKey = null);
     if (!r.ok) {
       setState(() => _error = r.error);
       return;
@@ -221,13 +392,64 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
         _reload = reload;
         final subscription = data.mN('subscription');
         final plans = data.l('planOptions');
-        final employeeCount = data.i('employeeCount');
+        final seatsUsed = data.i('seatsUsed');
         final invoices = data.l('invoices');
         final hasRazorpaySubscription = subscription?.b('hasRazorpaySubscription') ?? false;
+        final isAuthenticated = subscription?.b('isAuthenticated') ?? false;
+        final pendingPlanName = subscription?.sn('pendingPlanName');
+        final minSeats = seatsUsed < 1 ? 1 : seatsUsed;
+        final managingExisting = hasRazorpaySubscription && isAuthenticated;
+        final defaultSeats = managingExisting ? (subscription?.iN('maxSeats') ?? minSeats) : minSeats;
+        _ensureSeats(defaultSeats < minSeats ? minSeats : defaultSeats);
+        final seats = (_seats! < minSeats) ? minSeats : _seats!;
+        final canSubscribe = seatsUsed >= 1;
+
+        Widget planSection({required String heading}) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SectionTitle(heading),
+              if (!canSubscribe)
+                TsPanel(
+                  color: Ts.of(context).warningLight,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Add your first employee before setting up billing.',
+                          style: tx(14, weight: FontWeight.w600, color: Ts.of(context).warning)),
+                      const SizedBox(height: 4),
+                      const Muted('Subscriptions are billed per seat, so there must be at least one before checkout can start.'),
+                    ],
+                  ),
+                )
+              else
+                _SeatsInput(
+                  controller: _seatsController!,
+                  minSeats: minSeats,
+                  onChanged: (v) => _onSeatsChanged(v, minSeats),
+                ),
+              const SizedBox(height: 4),
+              for (final plan in plans)
+                _PlanCard(
+                  plan: plan,
+                  seats: seats,
+                  isCurrent: managingExisting && subscription?.sn('planId') == plan.sn('id'),
+                  currentCycle: subscription?.sn('billingCycle'),
+                  currentMaxSeats: subscription?.iN('maxSeats'),
+                  canSubscribe: canSubscribe,
+                  managingExisting: managingExisting,
+                  pendingKey: _pendingKey,
+                  onChoose: (cycle) => managingExisting
+                      ? _switchPlan(plan.s('id'), cycle, plan.s('name'), seats, reload)
+                      : _subscribe(plan.s('id'), cycle, plan.s('name'), seats, reload),
+                ),
+            ],
+          );
+        }
 
         return [
           const PageHeader(title: 'Billing', description: 'Your subscription, plan, and invoice history.'),
-          _StatusCard(subscription: subscription, employeeCount: employeeCount),
+          _StatusCard(subscription: subscription, seatsUsed: seatsUsed),
           if (_confirming)
             const StatusMessage(
               'Payment received - activating your subscription. This usually takes a few seconds.',
@@ -235,52 +457,41 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
               boxed: true,
             ),
           if (_error != null) StatusMessage.error(_error),
-          SectionTitle(hasRazorpaySubscription ? 'Change Plan' : 'Choose a Plan'),
-          if (!hasRazorpaySubscription && employeeCount < 1)
-            TsPanel(
-              color: Ts.of(context).warningLight,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+          if (!hasRazorpaySubscription)
+            planSection(heading: 'Choose a Plan')
+          else if (!isAuthenticated) ...[
+            _ResumeCheckoutCard(
+              subscription: subscription!,
+              pending: _pendingKey == 'resume-checkout',
+              onResume: () => _resumeCheckout(subscription, reload),
+            ),
+            planSection(heading: 'Or Choose a Different Plan'),
+          ] else ...[
+            if (pendingPlanName != null)
+              _PendingPlanChangeCard(
+                subscription: subscription!,
+                resumePending: _pendingKey == 'resume-pending',
+                cancelPending: _pendingKey == 'cancel-pending',
+                onResume: () => _resumePendingPlanChange(subscription, reload),
+                onCancel: () => _cancelPendingPlanChange(subscription, reload),
+              ),
+            planSection(heading: 'Change Plan'),
+            if (subscription?.sn('status') != 'CANCELED')
+              MobileCard(
                 children: [
-                  Text('Add your first employee before setting up billing.',
-                      style: tx(14, weight: FontWeight.w600, color: Ts.of(context).warning)),
-                  const SizedBox(height: 4),
-                  const Muted('Subscriptions are billed per active employee, so there must be at least one before checkout can start.'),
-                  const SizedBox(height: 8),
-                  TsButton.secondary(
-                    label: 'Go to Employees',
-                    icon: LucideIcons.users,
-                    onPressed: () => context.push('/employees'),
+                  const MobileCardHeader(title: 'Cancel Subscription'),
+                  const Muted(
+                    "Cancels at the end of your current billing period - you keep access until then, and it won't renew afterward.",
+                  ),
+                  const SizedBox(height: 10),
+                  TsButton.danger(
+                    label: 'Cancel Subscription',
+                    pending: _pendingKey == 'cancel',
+                    onPressed: () => _cancel(subscription?.sn('currentPeriodEnd'), reload),
                   ),
                 ],
               ),
-            ),
-          for (final plan in plans)
-            _PlanCard(
-              plan: plan,
-              employeeCount: employeeCount,
-              isCurrent: hasRazorpaySubscription && subscription?.sn('planId') == plan.sn('id'),
-              currentCycle: subscription?.sn('billingCycle'),
-              canSubscribe: employeeCount >= 1,
-              pendingKey: _pendingKey,
-              onChoose: (cycle) => hasRazorpaySubscription
-                  ? _switchPlan(plan.s('id'), cycle, reload)
-                  : _subscribe(plan.s('id'), cycle, plan.s('name'), reload),
-            ),
-          if (hasRazorpaySubscription && subscription?.sn('status') != 'CANCELED')
-            MobileCard(
-              children: [
-                const MobileCardHeader(title: 'Cancel Subscription'),
-                const Muted(
-                  "Cancels at the end of your current billing period - you keep access until then, and it won't renew afterward.",
-                ),
-                const SizedBox(height: 10),
-                TsButton.danger(
-                  label: 'Cancel Subscription',
-                  onPressed: () => _cancel(subscription?.sn('currentPeriodEnd'), reload),
-                ),
-              ],
-            ),
+          ],
           SectionTitle('Invoice History'),
           if (invoices.isEmpty)
             const EmptyState('No invoices yet.', icon: LucideIcons.receipt)
@@ -292,10 +503,30 @@ class _BillingSettingsScreenState extends State<BillingSettingsScreen> {
   }
 }
 
+class _SeatsInput extends StatelessWidget {
+  const _SeatsInput({required this.controller, required this.minSeats, required this.onChanged});
+  final TextEditingController controller;
+  final int minSeats;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return TsInput(
+      controller: controller,
+      label: 'Max Seats',
+      keyboardType: TextInputType.number,
+      inputFormatters: TsInput.digitsOnly,
+      onChanged: onChanged,
+      hint: 'You currently have $minSeats active seat${minSeats == 1 ? '' : 's'} in use (employees + admin/HR '
+          'logins) - set this higher to leave room to grow.',
+    );
+  }
+}
+
 class _StatusCard extends StatelessWidget {
-  const _StatusCard({required this.subscription, required this.employeeCount});
+  const _StatusCard({required this.subscription, required this.seatsUsed});
   final Json? subscription;
-  final int employeeCount;
+  final int seatsUsed;
 
   @override
   Widget build(BuildContext context) {
@@ -304,8 +535,8 @@ class _StatusCard extends StatelessWidget {
     }
     final status = subscription!.s('status');
     final trialEndsAt = subscription!.sn('trialEndsAt');
-    final pastDueSince = subscription!.sn('pastDueSince');
-    final daysUntilGraceEnds = subscription!.iN('daysUntilGraceEnds');
+    final currentPeriodEnd = subscription!.sn('currentPeriodEnd');
+    final maxSeats = subscription!.iN('maxSeats') ?? seatsUsed;
     final tone = status == 'ACTIVE'
         ? BadgeTone.green
         : status == 'PAST_DUE'
@@ -314,6 +545,9 @@ class _StatusCard extends StatelessWidget {
                 ? BadgeTone.slate
                 : BadgeTone.amber;
 
+    final periodEndDate = currentPeriodEnd == null ? null : DateTime.tryParse(currentPeriodEnd);
+    final periodStillOpen = periodEndDate != null && periodEndDate.isAfter(DateTime.now());
+
     return MobileCard(
       children: [
         MobileCardHeader(
@@ -321,27 +555,83 @@ class _StatusCard extends StatelessWidget {
           subtitle: subscription!.s('billingCycle') == 'MONTHLY' ? 'Billed monthly' : 'Billed annually',
           action: TsBadge(_statusLabel[status] ?? status, tone: tone),
         ),
-        Muted('Billed for $employeeCount active employee${employeeCount == 1 ? '' : 's'}.'),
+        Muted('Using $seatsUsed of $maxSeats seat${maxSeats == 1 ? '' : 's'} - every active employee and every '
+            'admin/HR login counts as one seat.'),
         if (status == 'TRIALING' && trialEndsAt != null) ...[
           const SizedBox(height: 10),
           StatusMessage.warning('Your free trial ends ${fmtDateMedium(trialEndsAt)}. Subscribe below to keep access.'),
         ],
         if (status == 'PAST_DUE') ...[
           const SizedBox(height: 10),
-          StatusMessage(
-            pastDueSince == null
-                ? 'Your last payment failed. Update your payment method to avoid losing access.'
-                : daysUntilGraceEnds == null || daysUntilGraceEnds > 0
-                    ? 'Your last payment failed. You have ${daysUntilGraceEnds ?? '?'} day(s) left before access is restricted.'
-                    : 'Your last payment failed. Access will be restricted today unless the payment is fixed.',
+          const StatusMessage(
+            'Your last payment failed - access is restricted immediately. Razorpay will keep retrying the charge '
+            'automatically; access is restored the moment a retry succeeds.',
             kind: StatusKind.error,
             boxed: true,
           ),
         ],
         if (status == 'CANCELED') ...[
           const SizedBox(height: 10),
-          const Muted('This subscription has been canceled. Subscribe again below to restore billing.'),
+          Muted(periodStillOpen
+              ? 'This subscription has been canceled. You keep access through ${fmtDateMedium(currentPeriodEnd)} '
+                  '(the period you already paid for), then access is restricted unless you subscribe again.'
+              : 'This subscription has been canceled. Access is restricted. Subscribe again below to restore it.'),
         ],
+      ],
+    );
+  }
+}
+
+class _ResumeCheckoutCard extends StatelessWidget {
+  const _ResumeCheckoutCard({required this.subscription, required this.pending, required this.onResume});
+  final Json subscription;
+  final bool pending;
+  final VoidCallback onResume;
+
+  @override
+  Widget build(BuildContext context) {
+    return MobileCard(
+      children: [
+        const MobileCardHeader(title: 'Finish setting up payment'),
+        Muted("You started checkout for ${subscription.s('planName')} but it wasn't completed - the payment window "
+            'may have been closed before setup finished. No charge was made. Resume to try again.'),
+        const SizedBox(height: 10),
+        TsButton(label: 'Resume Checkout', pending: pending, onPressed: onResume),
+      ],
+    );
+  }
+}
+
+class _PendingPlanChangeCard extends StatelessWidget {
+  const _PendingPlanChangeCard({
+    required this.subscription,
+    required this.resumePending,
+    required this.cancelPending,
+    required this.onResume,
+    required this.onCancel,
+  });
+  final Json subscription;
+  final bool resumePending;
+  final bool cancelPending;
+  final VoidCallback onResume;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return MobileCard(
+      children: [
+        const MobileCardHeader(title: 'Plan Change In Progress'),
+        Muted("You started switching to ${subscription.s('pendingPlanName')} but payment setup wasn't completed - "
+            "your current plan, ${subscription.s('planName')}, is still active and billing normally. No charge has "
+            'been made for the new plan yet.'),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(child: TsButton(label: 'Resume Checkout', pending: resumePending, onPressed: onResume)),
+            const SizedBox(width: 10),
+            Expanded(child: TsButton.secondary(label: 'Cancel This Change', pending: cancelPending, onPressed: onCancel)),
+          ],
+        ),
       ],
     );
   }
@@ -350,50 +640,81 @@ class _StatusCard extends StatelessWidget {
 class _PlanCard extends StatelessWidget {
   const _PlanCard({
     required this.plan,
-    required this.employeeCount,
+    required this.seats,
     required this.isCurrent,
     required this.currentCycle,
+    required this.currentMaxSeats,
     required this.canSubscribe,
+    required this.managingExisting,
     required this.pendingKey,
     required this.onChoose,
   });
   final Json plan;
-  final int employeeCount;
+  final int seats;
   final bool isCurrent;
   final String? currentCycle;
+  final int? currentMaxSeats;
   final bool canSubscribe;
+  final bool managingExisting;
   final String? pendingKey;
   final void Function(String cycle) onChoose;
 
   @override
   Widget build(BuildContext context) {
-    final monthly = plan.mN('monthly');
-    final annual = plan.mN('annual');
     final planId = plan.s('id');
+    final gstType = plan.s('gstType');
+    final monthlyRate = plan.iN('monthlyRatePaise');
+    final annualRate = plan.iN('annualRatePaise');
+    final safeSeats = seats < 1 ? 1 : seats;
+
+    String? monthlyPerSeat;
+    String? monthlyTotal;
+    if (monthlyRate != null) {
+      monthlyPerSeat = formatPaiseAsRupees(computeGst(monthlyRate, gstType).totalAmount);
+      monthlyTotal = formatPaiseAsRupees(computeGst(monthlyRate * safeSeats, gstType).totalAmount);
+    }
+    String? annualPerSeat;
+    String? annualTotal;
+    if (annualRate != null) {
+      annualPerSeat = formatPaiseAsRupees(computeGst(annualRate, gstType).totalAmount);
+      annualTotal = formatPaiseAsRupees(computeGst(annualChargePerEmployeePaise(annualRate) * safeSeats, gstType).totalAmount);
+    }
+
+    String labelFor(String cycle, bool sameAsCurrentCycle) {
+      if (!managingExisting) {
+        return cycle == 'MONTHLY' ? 'Subscribe monthly' : 'Subscribe annually';
+      }
+      if (sameAsCurrentCycle && seats == currentMaxSeats) {
+        return cycle == 'MONTHLY' ? 'Current plan (monthly)' : 'Current plan (annual)';
+      }
+      if (sameAsCurrentCycle) return 'Update Seats';
+      return cycle == 'MONTHLY' ? 'Switch to monthly' : 'Switch to annual';
+    }
+
+    bool disabledFor(bool sameAsCurrentCycle) {
+      if (!canSubscribe) return true;
+      return managingExisting && sameAsCurrentCycle && seats == currentMaxSeats;
+    }
+
     return MobileCard(
       children: [
         MobileCardHeader(title: plan.s('name')),
-        if (monthly != null)
-          MobileCardRow(label: 'Monthly, per employee (incl. GST)', value: monthly.s('perEmployeeLabel'), first: true),
-        if (annual != null)
-          MobileCardRow(label: 'Annual, per employee (incl. GST)', value: annual.s('perEmployeeLabel')),
+        if (monthlyPerSeat != null)
+          MobileCardRow(label: 'Monthly, per seat (incl. GST)', value: monthlyPerSeat, first: true),
+        if (annualPerSeat != null) MobileCardRow(label: 'Annual, per seat/mo (incl. GST)', value: annualPerSeat),
         const SizedBox(height: 10),
-        if (monthly != null)
+        if (monthlyTotal != null)
           TsButton.secondary(
-            label: isCurrent && currentCycle == 'MONTHLY'
-                ? 'Current plan (monthly)'
-                : 'Monthly - ${monthly.s('totalLabel')}/mo for $employeeCount',
+            label: '${labelFor('MONTHLY', isCurrent && currentCycle == 'MONTHLY')} ($monthlyTotal/mo for $safeSeats)',
             pending: pendingKey == '$planId:MONTHLY',
-            onPressed: (!canSubscribe || (isCurrent && currentCycle == 'MONTHLY')) ? null : () => onChoose('MONTHLY'),
+            onPressed: disabledFor(isCurrent && currentCycle == 'MONTHLY') ? null : () => onChoose('MONTHLY'),
           ),
-        if (annual != null) ...[
+        if (annualTotal != null) ...[
           const SizedBox(height: 8),
           TsButton(
-            label: isCurrent && currentCycle == 'ANNUAL'
-                ? 'Current plan (annual)'
-                : 'Annual - ${annual.s('totalLabel')}/yr for $employeeCount',
+            label: '${labelFor('ANNUAL', isCurrent && currentCycle == 'ANNUAL')} ($annualTotal/yr for $safeSeats)',
             pending: pendingKey == '$planId:ANNUAL',
-            onPressed: (!canSubscribe || (isCurrent && currentCycle == 'ANNUAL')) ? null : () => onChoose('ANNUAL'),
+            onPressed: disabledFor(isCurrent && currentCycle == 'ANNUAL') ? null : () => onChoose('ANNUAL'),
           ),
         ],
       ],

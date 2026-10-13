@@ -6,6 +6,7 @@ export 'package:go_router/go_router.dart';
 export 'package:lucide_icons_flutter/lucide_icons.dart';
 
 export '../core/api.dart';
+export '../core/billing_pricing.dart';
 export '../core/format.dart';
 export '../core/icons.dart';
 export '../core/json.dart';
