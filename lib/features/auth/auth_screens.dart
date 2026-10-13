@@ -15,6 +15,17 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   String _mode = 'password';
+  // Captured once from the global, read-once session.signOutReason (set by
+  // Session._onSessionProblem/restore() on a disabled-account force-logout
+  // - see session.dart's own comment) - cleared immediately so it doesn't
+  // reappear on a later, unrelated visit to this screen.
+  late final String? _signOutReason = session.signOutReason;
+
+  @override
+  void initState() {
+    super.initState();
+    session.signOutReason = null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -24,6 +35,12 @@ class _LoginScreenState extends State<LoginScreen> {
       description: 'Sign in to your account to continue.',
       child: Gap(
         children: [
+          if (_signOutReason == 'disabled')
+            const StatusMessage(
+              'This account has been disabled. Contact your administrator if you believe this is a mistake.',
+              kind: StatusKind.error,
+              boxed: true,
+            ),
           TsSegmented<String>(
             value: _mode,
             options: const [SelectOption('password', 'Password'), SelectOption('whatsapp', 'WhatsApp')],

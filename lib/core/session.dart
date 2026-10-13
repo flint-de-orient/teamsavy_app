@@ -74,6 +74,18 @@ class Session extends ChangeNotifier {
   /// Set when the backend says the account is suspended (/suspended).
   String? suspendedReason;
 
+  /// Set when a 401 force-logout carries a specific reason the login
+  /// screen should explain (currently only 'disabled' - see
+  /// resolveMobileSession's own comment in the flintdoc-hr repo for why
+  /// this matches on `redirect` rather than the message text). Unlike
+  /// suspendedReason, this doesn't redirect anywhere special - the user
+  /// was already being sent to the plain login screen; this just adds a
+  /// banner explaining why. Read-once: LoginScreen clears it after
+  /// capturing it into local state, mirroring web's /login?reason=disabled
+  /// banner, which is similarly one-shot (the cookie is already gone by
+  /// the time it's shown).
+  String? signOutReason;
+
   ThemeMode themeMode = ThemeMode.system;
 
   Future<void> restore() async {
@@ -106,6 +118,7 @@ class Session extends ChangeNotifier {
       // Offline at launch: keep the token, show the app; screens will show
       // their own retry state. Only a real auth failure signs out.
       if (e.status == 401 || e.code == 'platform_account') {
+        if ((e.redirect ?? '').contains('reason=disabled')) signOutReason = 'disabled';
         await _clear();
       } else if (e.code == 'suspended') {
         status = AuthStatus.signedIn;
@@ -149,6 +162,7 @@ class Session extends ChangeNotifier {
   void _onSessionProblem(ApiException e) {
     if (e.status == 401) {
       if (status == AuthStatus.signedIn) {
+        if ((e.redirect ?? '').contains('reason=disabled')) signOutReason = 'disabled';
         _clear().then((_) => notifyListeners());
       }
     } else if (e.code == 'suspended') {
